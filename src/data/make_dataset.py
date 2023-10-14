@@ -7,9 +7,10 @@ import nltk
 import pandas as pd
 import torch
 import youtokentome as yttm
-from tqdm.auto import tqdm
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
+from tqdm.auto import tqdm
 
 DATA_URL = 'https://github.com/skoltech-nlp/detox/releases/download/emnlp2021/filtered_paranmt.zip'
 DATA_RAW_FOLDER = 'data/raw/'
@@ -38,6 +39,10 @@ def _prepare_dataset():
     del data["Unnamed: 0"]
     data["length_diff"] = data["lenght_diff"]
     del data["lenght_diff"]
+
+    if not os.path.exists(DATA_INTERIM_FOLDER):
+        os.makedirs(DATA_INTERIM_FOLDER)
+
     data.to_csv(DATA_INTERIM_FOLDER + FILENAME, sep='\t')
     train, val_test = train_test_split(data, train_size=0.8, random_state=42)
     val, test = train_test_split(val_test, test_size=0.5, random_state=42)
@@ -62,17 +67,26 @@ def _prepare_bpe_tokenizer(dataframe):
     os.remove(data_path)
 
 
+def bleu_score(src, tgt):
+    smoothing_functions = SmoothingFunction()
+    bleu = sentence_bleu([src], tgt, smoothing_function=smoothing_functions.method1)
+    return bleu
+
+
 class TextDetoxificationDataset(Dataset):
     def __init__(self,
                  mode: str = 'train',
                  download: bool = False,
                  low_difference_filter: float = 0.0,
                  use_bpe: bool = False,
-                 token2idx: dict = None
+                 token2idx: dict = None,
+                 char_level: bool = False
                  ):
         assert mode == 'train' or token2idx is not None, 'For non-training mode, pass token2idx from train dataset'
-        assert use_bpe and os.path.exists(PATH_TO_BPE_MODEL) or mode == 'train', 'BPE tokenizer is fitted on train'
+        assert not (use_bpe and os.path.exists(
+            PATH_TO_BPE_MODEL)) or mode == 'train', 'BPE tokenizer is fitted on train'
         assert 0.0 <= low_difference_filter < 1.0, 'Toxicity difference threshold should be from [0; 1)'
+        assert not use_bpe if char_level else True, 'Incompatible tokenization types'
 
         nltk.download('punkt')
         if not os.path.exists(DATA_RAW_FOLDER + FILENAME) or download:
@@ -84,6 +98,7 @@ class TextDetoxificationDataset(Dataset):
 
         self.mode = mode
         self.use_bpe = use_bpe
+        self.char_level = char_level
 
         self.data = pd.read_csv(f'{DATA_INTERIM_FOLDER}/{mode}.tsv', sep='\t')
 
@@ -119,6 +134,8 @@ class TextDetoxificationDataset(Dataset):
         # casing is unlikely to be significant for the task
         if self.use_bpe:
             tokens = self.bpe_model.encode([sentence.lower()], output_type=yttm.OutputType.SUBWORD)
+        elif self.char_level:
+            tokens = list(sentence.lower())
         else:
             tokens = nltk.word_tokenize(sentence.lower())
         return tokens
@@ -135,8 +152,8 @@ class TextDetoxificationDataset(Dataset):
         source_tokens = self._tokenize_sentence(source)
         target_tokens = self._tokenize_sentence(target)
 
-        source_indices = [BOS_IDX] + [self.token2idx.get(token, '<unk>') for token in source_tokens] + [EOS_IDX]
-        target_indices = [BOS_IDX] + [self.token2idx.get(token, '<unk>') for token in target_tokens] + [EOS_IDX]
+        source_indices = [BOS_IDX] + [self.token2idx.get(token, UNK_IDX) for token in source_tokens] + [EOS_IDX]
+        target_indices = [BOS_IDX] + [self.token2idx.get(token, UNK_IDX) for token in target_tokens] + [EOS_IDX]
 
         stats = [
             row['similarity'],
@@ -153,6 +170,6 @@ class TextDetoxificationDataset(Dataset):
 
 if __name__ == '__main__':
     # use case
-    train_set = TextDetoxificationDataset(download=True)
-    print(train_set[0])
-    print(train_set.idx2token[4])
+    train_set = TextDetoxificationDataset(download=False)
+    for t in train_set:
+        pass
