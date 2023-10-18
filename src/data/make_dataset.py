@@ -1,15 +1,16 @@
 import os
 import urllib.request
 import zipfile
-from collections import Counter
 
 import nltk
 import pandas as pd
 import torch
+import torchtext
 import youtokentome as yttm
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
+from torchtext.vocab import build_vocab_from_iterator
 from tqdm.auto import tqdm
 
 DATA_URL = 'https://github.com/skoltech-nlp/detox/releases/download/emnlp2021/filtered_paranmt.zip'
@@ -17,7 +18,6 @@ DATA_RAW_FOLDER = 'data/raw/'
 DATA_INTERIM_FOLDER = 'data/interim/'
 FILENAME = 'filtered.tsv'
 PATH_TO_BPE_MODEL = 'models/bpe.model'
-PAD_IDX, UNK_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 
 
 def _download_dataset():
@@ -67,10 +67,43 @@ def _prepare_bpe_tokenizer(dataframe):
     os.remove(data_path)
 
 
-def bleu_score(src, tgt):
+def bleu_score(src, tgt, bpe_sep: str = None):
+    """
+
+    :param src:
+    :param tgt:
+    :param bpe_sep:
+    :return:
+    """
     smoothing_functions = SmoothingFunction()
+    if bpe_sep is not None:
+        assert isinstance(src[0], src) and isinstance(tgt[0], src),\
+            'If computing BLEU for BPE-tokenized sentence, pass List[str], not indices'
+        assert bpe_sep[-1] == ' ', 'Append space to BPE separator'
+        src = (' '.join(src)).replace(bpe_sep, '').split()
+        tgt = (' '.join(tgt)).replace(bpe_sep, '').split()
+
     bleu = sentence_bleu([src], tgt, smoothing_function=smoothing_functions.method1)
     return bleu
+
+
+def estimate_toxicity(sentences_batch):
+    """
+
+    :param sentences_batch:
+    :return:
+    """
+    pass
+
+
+def estimate_similarity(source_sentences_batch, target_sentences_batch):
+    """
+
+    :param source_sentences_batch:
+    :param target_sentences_batch:
+    :return:
+    """
+    pass
 
 
 class TextDetoxificationDataset(Dataset):
@@ -79,12 +112,12 @@ class TextDetoxificationDataset(Dataset):
                  download: bool = False,
                  low_difference_filter: float = 0.0,
                  use_bpe: bool = False,
-                 token2idx: dict = None,
+                 vocab: torchtext.vocab.Vocab = None,
                  char_level: bool = False
                  ):
-        assert mode == 'train' or token2idx is not None, 'For non-training mode, pass token2idx from train dataset'
+        assert mode == 'train' or vocab is not None, 'For non-training mode, pass the Vocab from train dataset'
         assert not (use_bpe and os.path.exists(
-            PATH_TO_BPE_MODEL)) or mode == 'train', 'BPE tokenizer is fitted on train'
+            PATH_TO_BPE_MODEL)) or mode == 'train', 'BPE tokenizer should be fitted on train'
         assert 0.0 <= low_difference_filter < 1.0, 'Toxicity difference threshold should be from [0; 1)'
         assert not use_bpe if char_level else True, 'Incompatible tokenization types'
 
@@ -110,25 +143,26 @@ class TextDetoxificationDataset(Dataset):
             _prepare_bpe_tokenizer(self.data)
             self.bpe_model = yttm.BPE(PATH_TO_BPE_MODEL, n_threads=2)
 
-        if token2idx is None:
-            # Add torchtext.vocab import build_vocab_from_iterator if loader is the bottleneck
-            tokens = ['<pad>', '<unk>', '<bos>', '<eos>']
-            tokens_freq = Counter()
+        self.PAD_IDX, self.UNK_IDX, self.BOS_IDX, self.EOS_IDX = 0, 1, 2, 3
+        self.specials = ['<pad>', '<unk>', '<bos>', '<eos>']
 
-            for i in tqdm(range(len(self.data)), desc='Building vocab'):
-                row = self.data.iloc[i]
-                tokens_freq.update(self._tokenize_sentence(row['reference']))
-                tokens_freq.update(self._tokenize_sentence(row['translation']))
+        if vocab is None:
+            min_count = 10 if not self.use_bpe else 1
 
-            if not use_bpe:
-                min_count = 10
-                tokens.extend(list(sorted(t for t, c in tokens_freq.items() if c >= min_count)))
+            def _iterator():
+                for i, row in tqdm(self.data.iterrows(), desc='Collecting vocab'):
+                    yield self._tokenize_sentence(row['reference']) + self._tokenize_sentence(row['translation'])
+
+            print('Started building vocab')
+            if not self.use_bpe:
+                vocab = build_vocab_from_iterator(_iterator(), min_freq=min_count, specials=self.specials)
             else:
-                tokens.extend([t for t, c in tokens_freq.items()])
+                vocab = build_vocab_from_iterator(iter(self.bpe_model.vocab()), min_freq=min_count,
+                                                  specials=self.specials)
+            vocab.set_default_index(self.UNK_IDX)
+            print('Vocab built successfully')
 
-            token2idx = {token: i for i, token in enumerate(tokens)}
-        self.token2idx = token2idx
-        self.idx2token = {i: token for token, i in self.token2idx.items()}
+        self.vocab = vocab
 
     def _tokenize_sentence(self, sentence):
         # casing is unlikely to be significant for the task
@@ -152,8 +186,8 @@ class TextDetoxificationDataset(Dataset):
         source_tokens = self._tokenize_sentence(source)
         target_tokens = self._tokenize_sentence(target)
 
-        source_indices = [BOS_IDX] + [self.token2idx.get(token, UNK_IDX) for token in source_tokens] + [EOS_IDX]
-        target_indices = [BOS_IDX] + [self.token2idx.get(token, UNK_IDX) for token in target_tokens] + [EOS_IDX]
+        source_indices = [self.BOS_IDX] + self.vocab(source_tokens) + [self.EOS_IDX]
+        target_indices = [self.BOS_IDX] + self.vocab(target_tokens) + [self.EOS_IDX]
 
         stats = [
             row['similarity'],
@@ -173,3 +207,6 @@ if __name__ == '__main__':
     train_set = TextDetoxificationDataset(download=False)
     for t in train_set:
         pass
+    for t in train_set:
+        print(t)
+        break
