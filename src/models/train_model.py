@@ -109,7 +109,7 @@ class BaselineTranslationModel(nn.Module):
         return torch.stack(outputs, dim=1), all_states
 
 
-def train(model_type: str, steps: int, optimizer: str, scheduler: str):
+def train(model_type: str, epochs: int, optimizer: str, scheduler: str):
     assert model_type.lower() in {'baseline', 'experiment1', 'experiment2'}
 
 

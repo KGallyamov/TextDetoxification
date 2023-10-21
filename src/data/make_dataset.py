@@ -7,11 +7,14 @@ import pandas as pd
 import torch
 import torchtext
 import youtokentome as yttm
+from loguru import logger
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from torchtext.vocab import build_vocab_from_iterator
 from tqdm.auto import tqdm
+import torch.nn.functional as F
+from transformers import RobertaTokenizer, RobertaForSequenceClassification, RobertaModel, AutoTokenizer, AutoModel
 
 DATA_URL = 'https://github.com/skoltech-nlp/detox/releases/download/emnlp2021/filtered_paranmt.zip'
 DATA_RAW_FOLDER = 'data/raw/'
@@ -30,7 +33,7 @@ def _download_dataset():
     with zipfile.ZipFile(zip_file) as zf:
         zf.extract(FILENAME, path=DATA_RAW_FOLDER)
 
-    print('File downloaded and extracted to', os.path.join(DATA_RAW_FOLDER, FILENAME))
+    logger.info('File downloaded and extracted to ' + str(os.path.join(DATA_RAW_FOLDER, FILENAME)))
 
 
 def _prepare_dataset():
@@ -56,54 +59,105 @@ def _prepare_bpe_tokenizer(dataframe):
     data_path = 'data/raw/sentences.txt'
 
     with open(data_path, "w") as out:
-        for i in range(len(dataframe)):
-            row = dataframe.iloc[i]
-            print(f'{row.reference.lower()} {row.translation.lower()}', file=out)
+        for reference, translation in zip(dataframe.reference, dataframe.translation):
+            print(f'{reference.lower()} {translation.lower()}', file=out)
 
     yttm.BPE.train(data_path,
                    PATH_TO_BPE_MODEL,
                    vocab_size=10000,
-                   n_threads=4)
+                   n_threads=-1)
     os.remove(data_path)
 
 
-def bleu_score(src, tgt, bpe_sep: str = None):
-    """
+class Evaluator:
+    def __init__(self, low_gpu_mem: bool = True):
+        self.low_gpu_mem = low_gpu_mem
+        self.toxicity_tokenizer = RobertaTokenizer.from_pretrained('SkolkovoInstitute/roberta_toxicity_classifier')
+        self.toxicity_model = RobertaForSequenceClassification.from_pretrained('SkolkovoInstitute/roberta_toxicity_classifier')
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    :param src:
-    :param tgt:
-    :param bpe_sep:
-    :return:
-    """
-    smoothing_functions = SmoothingFunction()
-    if bpe_sep is not None:
-        assert isinstance(src[0], src) and isinstance(tgt[0], src),\
-            'If computing BLEU for BPE-tokenized sentence, pass List[str], not indices'
-        assert bpe_sep[-1] == ' ', 'Append space to BPE separator'
-        src = (' '.join(src)).replace(bpe_sep, '').split()
-        tgt = (' '.join(tgt)).replace(bpe_sep, '').split()
+        self.similarity_tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2')
+        self.similarity_model = AutoModel.from_pretrained('sentence-transformers/all-mpnet-base-v2')
 
-    bleu = sentence_bleu([src], tgt, smoothing_function=smoothing_functions.method1)
-    return bleu
+        if not self.low_gpu_mem:
+            self.toxicity_model.to('cuda')
+            self.similarity_model.to('cuda')
 
+    @staticmethod
+    def bleu_score(src, tgt, bpe_sep: str = None):
+        """
 
-def estimate_toxicity(sentences_batch):
-    """
+        :param src:
+        :param tgt:
+        :param bpe_sep:
+        :return:
+        """
+        smoothing_functions = SmoothingFunction()
+        if bpe_sep is not None:
+            assert isinstance(src[0], str) and isinstance(tgt[0], str), \
+                'If computing BLEU for BPE-tokenized sentence, pass List[str], not indices'
+            assert bpe_sep[-1] == ' ', 'Append space to BPE separator'
+            src = (' '.join(src)).replace(bpe_sep, '').split()
+            tgt = (' '.join(tgt)).replace(bpe_sep, '').split()
 
-    :param sentences_batch:
-    :return:
-    """
-    pass
+        bleu = sentence_bleu([src], tgt, smoothing_function=smoothing_functions.method1)
+        return bleu
 
+    def estimate_toxicity(self, sentences_batch, threshold: float = 0.5):
+        """
+        Code adapted from https://github.com/s-nlp/detox/blob/main/emnlp2021/metric/metric.py
+        :param threshold:
+        :param sentences_batch:
+        :return:
+        """
+        if self.low_gpu_mem:
+            self.toxicity_model.to(self.device)
+        batch = self.toxicity_tokenizer(sentences_batch, return_tensors='pt', padding=True)
+        with torch.inference_mode():
+            logits = self.toxicity_model(**batch).logits
 
-def estimate_similarity(source_sentences_batch, target_sentences_batch):
-    """
+        scores = (torch.softmax(logits, -1) > threshold).cpu().numpy()
 
-    :param source_sentences_batch:
-    :param target_sentences_batch:
-    :return:
-    """
-    pass
+        if self.low_gpu_mem:
+            self.toxicity_model.to('cpu')
+        return 1 - scores
+
+    def estimate_similarity(self, source_sentences_batch, target_sentences_batch):
+        """
+
+        :param source_sentences_batch:
+        :param target_sentences_batch:
+        :return:
+        """
+        if self.low_gpu_mem:
+            self.toxicity_model.to(self.device)
+        encoded_source = self.similarity_tokenizer(source_sentences_batch, padding=True, truncation=True,
+                                                   return_tensors='pt')
+        encoded_target = self.similarity_tokenizer(target_sentences_batch, padding=True, truncation=True,
+                                                   return_tensors='pt')
+
+        def _mean_pooling(model_output, attention_mask):
+            token_embeddings = model_output[0]
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1),
+                                                                                      min=1e-9)
+
+        with torch.no_grad():
+            source_emb = self.similarity_model(**encoded_source)
+            target_emb = self.similarity_model(**encoded_target)
+
+        source_emb = _mean_pooling(source_emb, encoded_source['attention_mask'])
+        source_emb = F.normalize(source_emb, p=2, dim=1)
+
+        target_emb = _mean_pooling(target_emb, encoded_target['attention_mask'])
+        target_emb = F.normalize(target_emb, p=2, dim=1)
+
+        similarities = (source_emb * target_emb).sum(-1)
+
+        if self.low_gpu_mem:
+            self.toxicity_model.to('cpu')
+
+        return similarities
 
 
 class TextDetoxificationDataset(Dataset):
@@ -123,10 +177,10 @@ class TextDetoxificationDataset(Dataset):
 
         nltk.download('punkt')
         if not os.path.exists(DATA_RAW_FOLDER + FILENAME) or download:
-            print(f'Downloading the data from {DATA_URL}')
+            logger.info(f'Downloading the data from {DATA_URL}')
             _download_dataset()
         if not os.path.exists(DATA_INTERIM_FOLDER + f'{mode}.tsv') or download:
-            print(f'Splitting into train-val-test')
+            logger.info(f'Splitting into train-val-test')
             _prepare_dataset()
 
         self.mode = mode
@@ -150,17 +204,18 @@ class TextDetoxificationDataset(Dataset):
             min_count = 10 if not self.use_bpe else 1
 
             def _iterator():
-                for i, row in tqdm(self.data.iterrows(), desc='Collecting vocab'):
-                    yield self._tokenize_sentence(row['reference']) + self._tokenize_sentence(row['translation'])
+                for reference, reference in tqdm(zip(self.data.reference, self.data.translation),
+                                                 desc='Collecting vocab'):
+                    yield self._tokenize_sentence(reference) + self._tokenize_sentence(reference)
 
-            print('Started building vocab')
+            logger.info('Started building vocab')
             if not self.use_bpe:
                 vocab = build_vocab_from_iterator(_iterator(), min_freq=min_count, specials=self.specials)
             else:
                 vocab = build_vocab_from_iterator(iter(self.bpe_model.vocab()), min_freq=min_count,
                                                   specials=self.specials)
             vocab.set_default_index(self.UNK_IDX)
-            print('Vocab built successfully')
+            logger.info('Vocab built successfully')
 
         self.vocab = vocab
 
@@ -186,8 +241,8 @@ class TextDetoxificationDataset(Dataset):
         source_tokens = self._tokenize_sentence(source)
         target_tokens = self._tokenize_sentence(target)
 
-        source_indices = [self.BOS_IDX] + self.vocab(source_tokens) + [self.EOS_IDX]
-        target_indices = [self.BOS_IDX] + self.vocab(target_tokens) + [self.EOS_IDX]
+        source_indices = self.vocab(source_tokens)
+        target_indices = self.vocab(target_tokens)
 
         stats = [
             row['similarity'],
