@@ -5,6 +5,7 @@ import zipfile
 import nltk
 import pandas as pd
 import torch
+import torch.nn.functional as F
 import torchtext
 import youtokentome as yttm
 from loguru import logger
@@ -13,14 +14,14 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from torchtext.vocab import build_vocab_from_iterator
 from tqdm.auto import tqdm
-import torch.nn.functional as F
-from transformers import RobertaTokenizer, RobertaForSequenceClassification, RobertaModel, AutoTokenizer, AutoModel
+from transformers import RobertaTokenizer, RobertaForSequenceClassification, AutoTokenizer, AutoModel
 
 DATA_URL = 'https://github.com/skoltech-nlp/detox/releases/download/emnlp2021/filtered_paranmt.zip'
 DATA_RAW_FOLDER = 'data/raw/'
 DATA_INTERIM_FOLDER = 'data/interim/'
 FILENAME = 'filtered.tsv'
 PATH_TO_BPE_MODEL = 'models/bpe.model'
+BPE_SEP = "_ "
 
 
 def _download_dataset():
@@ -70,18 +71,14 @@ def _prepare_bpe_tokenizer(dataframe):
 
 
 class Evaluator:
-    def __init__(self, low_gpu_mem: bool = True):
-        self.low_gpu_mem = low_gpu_mem
+    def __init__(self):
         self.toxicity_tokenizer = RobertaTokenizer.from_pretrained('SkolkovoInstitute/roberta_toxicity_classifier')
-        self.toxicity_model = RobertaForSequenceClassification.from_pretrained('SkolkovoInstitute/roberta_toxicity_classifier')
+        self.toxicity_model = RobertaForSequenceClassification.from_pretrained(
+            'SkolkovoInstitute/roberta_toxicity_classifier')
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
         self.similarity_tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2')
         self.similarity_model = AutoModel.from_pretrained('sentence-transformers/all-mpnet-base-v2')
-
-        if not self.low_gpu_mem:
-            self.toxicity_model.to('cuda')
-            self.similarity_model.to('cuda')
 
     @staticmethod
     def bleu_score(src, tgt, bpe_sep: str = None):
@@ -103,38 +100,35 @@ class Evaluator:
         bleu = sentence_bleu([src], tgt, smoothing_function=smoothing_functions.method1)
         return bleu
 
-    def estimate_toxicity(self, sentences_batch, threshold: float = 0.5):
+    def estimate_toxicity(self, sentences_batch, threshold: float = 0.5, probs: bool = False):
         """
         Code adapted from https://github.com/s-nlp/detox/blob/main/emnlp2021/metric/metric.py
+        :param probs:
         :param threshold:
         :param sentences_batch:
         :return:
         """
-        if self.low_gpu_mem:
-            self.toxicity_model.to(self.device)
-        batch = self.toxicity_tokenizer(sentences_batch, return_tensors='pt', padding=True)
+        batch = self.toxicity_tokenizer(sentences_batch, return_tensors='pt', padding=True).to(self.device)
         with torch.inference_mode():
             logits = self.toxicity_model(**batch).logits
 
-        scores = (torch.softmax(logits, -1) > threshold).cpu().numpy()
+        if probs:
+            scores = torch.softmax(logits, -1)[:, 1].cpu().numpy()
+        else:
+            scores = (torch.softmax(logits, -1)[:, 1] > threshold).cpu().numpy()
+        return scores
 
-        if self.low_gpu_mem:
-            self.toxicity_model.to('cpu')
-        return 1 - scores
-
-    def estimate_similarity(self, source_sentences_batch, target_sentences_batch):
+    def estimate_similarity(self, source_sentences_batch, predicted_sentences_batch):
         """
 
         :param source_sentences_batch:
-        :param target_sentences_batch:
+        :param predicted_sentences_batch:
         :return:
         """
-        if self.low_gpu_mem:
-            self.toxicity_model.to(self.device)
         encoded_source = self.similarity_tokenizer(source_sentences_batch, padding=True, truncation=True,
-                                                   return_tensors='pt')
-        encoded_target = self.similarity_tokenizer(target_sentences_batch, padding=True, truncation=True,
-                                                   return_tensors='pt')
+                                                   return_tensors='pt').to(self.device)
+        encoded_pred = self.similarity_tokenizer(predicted_sentences_batch, padding=True, truncation=True,
+                                                 return_tensors='pt').to(self.device)
 
         def _mean_pooling(model_output, attention_mask):
             token_embeddings = model_output[0]
@@ -144,19 +138,15 @@ class Evaluator:
 
         with torch.no_grad():
             source_emb = self.similarity_model(**encoded_source)
-            target_emb = self.similarity_model(**encoded_target)
+            pred_emb = self.similarity_model(**encoded_pred)
 
         source_emb = _mean_pooling(source_emb, encoded_source['attention_mask'])
         source_emb = F.normalize(source_emb, p=2, dim=1)
 
-        target_emb = _mean_pooling(target_emb, encoded_target['attention_mask'])
-        target_emb = F.normalize(target_emb, p=2, dim=1)
+        pred_emb = _mean_pooling(pred_emb, encoded_pred['attention_mask'])
+        pred_emb = F.normalize(pred_emb, p=2, dim=1)
 
-        similarities = (source_emb * target_emb).sum(-1)
-
-        if self.low_gpu_mem:
-            self.toxicity_model.to('cpu')
-
+        similarities = (source_emb * pred_emb).sum(-1)
         return similarities
 
 
@@ -228,6 +218,24 @@ class TextDetoxificationDataset(Dataset):
         else:
             tokens = nltk.word_tokenize(sentence.lower())
         return tokens
+
+    def detokenize(self, tokens_batch):
+        itos = self.vocab.get_itos()
+        sentences = []
+        for sequence in tokens_batch:
+            sentence = []
+            for word_id in sequence:
+                if word_id in [self.BOS_IDX, self.PAD_IDX]:
+                    continue
+                if word_id == self.EOS_IDX:
+                    break
+                sentence.append(itos[word_id])
+            if len(sentence) == 0:
+                sentence = ['<pad>']
+            sentences.append(" ".join(sentence))
+        if self.use_bpe:
+            sentences = [sentence.replace(BPE_SEP, '') for sentence in sentences]
+        return sentences
 
     def __len__(self):
         return len(self.data)
