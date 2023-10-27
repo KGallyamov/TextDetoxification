@@ -9,3 +9,6 @@ fire~=0.4.0
 torchtext==0.15.1
 loguru~=0.7.2
 transformers~=4.23.1
+peft~=0.5.0
+evaluate~=0.4.1
+rouge_score~=0.1.2

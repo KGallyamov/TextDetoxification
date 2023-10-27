@@ -143,6 +143,13 @@ def train_step(train_loader, model, metrics, optimizer, scheduler):
 
 
 def val_step(val_loader, model, metrics, best_bleu):
+    """
+    :param val_loader:
+    :param model:
+    :param metrics:
+    :param best_bleu:
+    :return:
+    """
     mean_bleu = 0
     mean_loss = 0
     step = len(metrics['train_loss'])
@@ -164,6 +171,13 @@ def val_step(val_loader, model, metrics, best_bleu):
 
 
 def test_step(test_loader, test_dataset, model, verbose: bool = True):
+    """
+    :param test_loader:
+    :param test_dataset:
+    :param model:
+    :param verbose:
+    :return:
+    """
     evaluator = Evaluator()
     toxicity_drop = []
     similarity = []
@@ -187,17 +201,29 @@ def test_step(test_loader, test_dataset, model, verbose: bool = True):
 
 def train_baseline(epochs: int,
                    batch_size: int = 32,
+                   use_subword_tokenization: bool = False,
                    embeddings_size: int = 200,
                    hidden_size: int = 200,
                    n_layers: int = 3,
                    device_type: str = 'cuda:0',
                    verbose_test: bool = True
                    ):
+    """
+    :param epochs:
+    :param batch_size:
+    :param use_subword_tokenization:
+    :param embeddings_size:
+    :param hidden_size:
+    :param n_layers:
+    :param device_type:
+    :param verbose_test:
+    :return:
+    """
     device = torch.device(device_type)
     experiment_start = str(datetime.datetime.now()).replace(' ', '_')
-    train_dataset = TextDetoxificationDataset(mode='train')
-    val_dataset = TextDetoxificationDataset(mode='val', vocab=train_dataset.vocab)
-    test_dataset = TextDetoxificationDataset(mode='test', vocab=train_dataset.vocab)
+    train_dataset = TextDetoxificationDataset(mode='train', use_bpe=use_subword_tokenization)
+    val_dataset = TextDetoxificationDataset(mode='val',  use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
+    test_dataset = TextDetoxificationDataset(mode='test',  use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
 
     def collate_batch(batch, max_len=64):
         source, target = [], []
@@ -245,13 +271,16 @@ def train_baseline(epochs: int,
         plt.title(name)
         plt.plot(*zip(*history))
         plt.grid()
+    os.makedirs('reports/figures/', exist_ok=True)
     plt.savefig(f'reports/figures/{experiment_start}_baseline.png')
 
     test_step(test_loader, test_dataset, model, verbose_test)
 
 
 if __name__ == '__main__':
-    # python src/models/train_model.py baseline --epochs=10
+    # Examples
+    # python src/models/train_model.py baseline --epochs=10 --batch_size=32 --embeddings_size=200
+
     sys.path.append(os.getcwd())
 
     from src.data.make_dataset import TextDetoxificationDataset, Evaluator
@@ -259,7 +288,7 @@ if __name__ == '__main__':
     Fire(
         {
             "baseline": train_baseline,
-            "T5_soft": None,
-            "T5_prefix": None
+            "t5_lora": None,
+            "t5_prefix_tuning": None
         }
     )

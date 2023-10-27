@@ -83,7 +83,6 @@ class Evaluator:
     @staticmethod
     def bleu_score(src, tgt, bpe_sep: str = None):
         """
-
         :param src:
         :param tgt:
         :param bpe_sep:
@@ -120,7 +119,6 @@ class Evaluator:
 
     def estimate_similarity(self, source_sentences_batch, predicted_sentences_batch):
         """
-
         :param source_sentences_batch:
         :param predicted_sentences_batch:
         :return:
@@ -159,13 +157,21 @@ class TextDetoxificationDataset(Dataset):
                  vocab: torchtext.vocab.Vocab = None,
                  char_level: bool = False
                  ):
+        """
+        :param mode:
+        :param download:
+        :param low_difference_filter:
+        :param use_bpe:
+        :param vocab:
+        :param char_level:
+        """
         assert mode == 'train' or vocab is not None, 'For non-training mode, pass the Vocab from train dataset'
         assert not (use_bpe and os.path.exists(
             PATH_TO_BPE_MODEL)) or mode == 'train', 'BPE tokenizer should be fitted on train'
         assert 0.0 <= low_difference_filter < 1.0, 'Toxicity difference threshold should be from [0; 1)'
         assert not use_bpe if char_level else True, 'Incompatible tokenization types'
 
-        nltk.download('punkt')
+        nltk.download('punkt', quiet=True)
         if not os.path.exists(DATA_RAW_FOLDER + FILENAME) or download:
             logger.info(f'Downloading the data from {DATA_URL}')
             _download_dataset()
@@ -220,6 +226,10 @@ class TextDetoxificationDataset(Dataset):
         return tokens
 
     def detokenize(self, tokens_batch):
+        """
+        :param tokens_batch:
+        :return:
+        """
         itos = self.vocab.get_itos()
         sentences = []
         for sequence in tokens_batch:
