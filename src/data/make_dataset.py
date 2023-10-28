@@ -25,6 +25,10 @@ BPE_SEP = "_ "
 
 
 def _download_dataset():
+    """
+    Download data from DATA_URL, unzip into DATA_RAW_FOLDER/FILENAME
+    :return: None
+    """
     zip_file, headers = urllib.request.urlretrieve(DATA_URL)
 
     if not os.path.exists(DATA_RAW_FOLDER):
@@ -38,7 +42,10 @@ def _download_dataset():
 
 
 def _prepare_dataset():
-    # room for improvement: apply spellchecking (like SAGE) to sentences
+    """
+    Split data from DATA_RAW_FOLDER/FILENAME into train-val-test, rename columns
+    :return: None
+    """
     data = pd.read_csv(DATA_RAW_FOLDER + FILENAME, sep='\t')
     del data["Unnamed: 0"]
     data["length_diff"] = data["lenght_diff"]
@@ -57,6 +64,11 @@ def _prepare_dataset():
 
 
 def _prepare_bpe_tokenizer(dataframe):
+    """
+    Train BPE on texts from dataframe and save it into PATH_TO_BPE_MODEL
+    :param dataframe: Dataframe with texts on which BPE will be fitted
+    :return: None
+    """
     data_path = 'data/raw/sentences.txt'
 
     with open(data_path, "w") as out:
@@ -67,11 +79,18 @@ def _prepare_bpe_tokenizer(dataframe):
                    PATH_TO_BPE_MODEL,
                    vocab_size=10000,
                    n_threads=-1)
-    os.remove(data_path)
+    os.remove(data_path)  # remove file on which BPE was trained
 
 
 class Evaluator:
+    """
+    Class to evaluate quality of detoxification
+    """
+
     def __init__(self):
+        """
+        Load models and tokenizers for similarity and toxicity measurement
+        """
         self.toxicity_tokenizer = RobertaTokenizer.from_pretrained('SkolkovoInstitute/roberta_toxicity_classifier')
         self.toxicity_model = RobertaForSequenceClassification.from_pretrained(
             'SkolkovoInstitute/roberta_toxicity_classifier')
@@ -83,10 +102,10 @@ class Evaluator:
     @staticmethod
     def bleu_score(src, tgt, bpe_sep: str = None):
         """
-        :param src:
-        :param tgt:
-        :param bpe_sep:
-        :return:
+        :param src: List[src] / List[int] of source (reference) tokens / token ids
+        :param tgt: List[src] / List[int] of target (translation) tokens / token ids
+        :param bpe_sep: If dataset uses BPE, concat sub-words using this separator
+        :return: float, BLEU score for (src, tgt)
         """
         smoothing_functions = SmoothingFunction()
         if bpe_sep is not None:
@@ -102,10 +121,10 @@ class Evaluator:
     def estimate_toxicity(self, sentences_batch, threshold: float = 0.5, probs: bool = False):
         """
         Code adapted from https://github.com/s-nlp/detox/blob/main/emnlp2021/metric/metric.py
-        :param probs:
-        :param threshold:
-        :param sentences_batch:
-        :return:
+        :param probs: bool, If set to True, the return value will be softmax(logits). Else return {0, 1} predicions
+        :param threshold: Cutoff for probabilities of toxicity. Has no effect is probs=True
+        :param sentences_batch: List[str] of sentences
+        :return: Array of length sentences_batch
         """
         batch = self.toxicity_tokenizer(sentences_batch, return_tensors='pt', padding=True).to(self.device)
         with torch.inference_mode():
@@ -119,9 +138,10 @@ class Evaluator:
 
     def estimate_similarity(self, source_sentences_batch, predicted_sentences_batch):
         """
-        :param source_sentences_batch:
-        :param predicted_sentences_batch:
-        :return:
+        Code adapted from https://huggingface.co/sentence-transformers/all-mpnet-base-v2
+        :param source_sentences_batch: List[str] of reference (source) sentences
+        :param predicted_sentences_batch: List[str] of translation (target) sentences
+        :return: Array of same length as source_sentences_batch and predicted_sentences_batch
         """
         encoded_source = self.similarity_tokenizer(source_sentences_batch, padding=True, truncation=True,
                                                    return_tensors='pt').to(self.device)
@@ -158,12 +178,13 @@ class TextDetoxificationDataset(Dataset):
                  char_level: bool = False
                  ):
         """
-        :param mode:
-        :param download:
-        :param low_difference_filter:
-        :param use_bpe:
-        :param vocab:
-        :param char_level:
+        :param mode: One of 'train', 'val' and 'test'. If set to train, vocab and tokenizer is fit on the data
+        :param download: If set to True, download from DATA_URL. Else, look in DATA_RAW_FOLDER and DATA_INTERIM_FOLDER
+        :param low_difference_filter: Cutoff for (src, tgt) toxicity drop.
+            If greater than zero, pairs with |src_tox - ref_tox| <= low_difference_filter will be discarded
+        :param use_bpe: If set to True, fit BPE from YouTokenToMe on the data. Else, use nltk.word_tokenize
+        :param vocab: If mode is not 'train', in this argument should be the vocab of the training dataset
+        :param char_level: If set to True, build vocab of characters
         """
         assert mode == 'train' or vocab is not None, 'For non-training mode, pass the Vocab from train dataset'
         assert not (use_bpe and os.path.exists(
@@ -197,7 +218,7 @@ class TextDetoxificationDataset(Dataset):
         self.specials = ['<pad>', '<unk>', '<bos>', '<eos>']
 
         if vocab is None:
-            min_count = 10 if not self.use_bpe else 1
+            min_count = 10 if not self.use_bpe else 1  # Cutoff rare words
 
             def _iterator():
                 for reference, reference in tqdm(zip(self.data.reference, self.data.translation),
@@ -216,6 +237,11 @@ class TextDetoxificationDataset(Dataset):
         self.vocab = vocab
 
     def _tokenize_sentence(self, sentence):
+        """
+        Apply BPE or nltk.word_tokenize on the sentence.lower()
+        :param sentence: str
+        :return: Tokenized sentence
+        """
         # casing is unlikely to be significant for the task
         if self.use_bpe:
             tokens = self.bpe_model.encode([sentence.lower()], output_type=yttm.OutputType.SUBWORD)
@@ -227,8 +253,9 @@ class TextDetoxificationDataset(Dataset):
 
     def detokenize(self, tokens_batch):
         """
-        :param tokens_batch:
-        :return:
+        Transform predicted token ids to List[str] of sentences omitting special tokens
+        :param tokens_batch: Token ids of shape [batch_size, seq_len]
+        :return: List[str]
         """
         itos = self.vocab.get_itos()
         sentences = []
@@ -252,10 +279,13 @@ class TextDetoxificationDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
+
+        # Select high toxicity sentences
         source, target = row['reference'], row['translation']
         if row['ref_tox'] < row['trn_tox']:
             source, target = row['translation'], row['reference']
 
+        # Tokenize sentences and transform to indices
         source_tokens = self._tokenize_sentence(source)
         target_tokens = self._tokenize_sentence(target)
 
