@@ -13,7 +13,7 @@ from datasets import Dataset, DatasetDict
 from fire import Fire
 from loguru import logger
 from lovely_numpy import lo
-from peft import get_peft_model, TaskType, LoraConfig
+from peft import get_peft_model, TaskType, LoraConfig, PrefixTuningConfig
 from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -29,7 +29,14 @@ class BaselineTranslationModel(nn.Module):
     # This code is adapted from:
     # https://github.com/yandexdataschool/nlp_course/blob/2022/week04_seq2seq/practice_and_homework_pytorch.ipynb
 
-    def __init__(self, vocab, emb_dim, hidden_dim, n_layers, do_weight_tying=True):
+    def __init__(self, vocab, emb_dim, hidden_dim, n_layers, do_weight_tying=True, init_embeddings_if_possible=True):
+        """
+        :param vocab: Dataset vocabulary, torchtext.Vocab
+        :param emb_dim: Embedding size, if equal to 200 or 300, will load pretrained GLoVE
+        :param hidden_dim: RNN hidden size
+        :param n_layers: Number of layers in RNN
+        :param do_weight_tying: If set to True, tie input and output vocab projections
+        """
         nn.Module.__init__(self)
         self.num_words = len(vocab)
         self.hidden_dim = hidden_dim
@@ -37,7 +44,7 @@ class BaselineTranslationModel(nn.Module):
         self.emb_dim = emb_dim
         self.embeddings = nn.Embedding(self.num_words, emb_dim)
         # Pretrained embeddings to speed up convergence
-        if emb_dim in [GLOVE_TWITTER_EMBEDDING_DIM, GLOVE_WIKI_EMBEDDING_DIM]:
+        if emb_dim in [GLOVE_TWITTER_EMBEDDING_DIM, GLOVE_WIKI_EMBEDDING_DIM] and init_embeddings_if_possible:
             self._init_embeddings()
 
         self.encoder = nn.GRU(emb_dim, hidden_dim, n_layers, batch_first=True)
@@ -51,6 +58,10 @@ class BaselineTranslationModel(nn.Module):
             self.vocab_projection.weight = self.embeddings.weight
 
     def _init_embeddings(self):
+        """
+        Load pretrained GLoVE vectors into embeddings projection
+        :return: None
+        """
         if self.emb_dim == GLOVE_WIKI_EMBEDDING_DIM:
             glove_model = api.load('glove-wiki-gigaword-300')
         else:
@@ -61,10 +72,21 @@ class BaselineTranslationModel(nn.Module):
         assert self.embeddings.weight.requires_grad, "Embeddings should be trainable"
 
     def forward(self, inp, out):
+        """
+        Forward input with output teacher forcing
+        :param inp: input indices batch [batch_size, input_seq_len]
+        :param out: output indices batch [batch_size, output_seq_len]
+        :return: Output tokens logits of shape [batch_size, output_seq_len, vocab_size]
+        """
         initial_state = self.encode(inp)
         return self.decode(initial_state, out)
 
     def encode(self, inp):
+        """
+        Get RNN last hidden state
+        :param inp: input indices batch [batch_size, input_seq_len]
+        :return: RNN hidden state at last (not counting padding) state
+        """
         emb = self.embeddings(inp)
 
         encoded, _ = self.encoder(emb)
@@ -77,6 +99,12 @@ class BaselineTranslationModel(nn.Module):
         return [dec_start]
 
     def decode_step(self, prev_state, prev_output):
+        """
+        Given previous decoder state, preform one forward step through time
+        :param prev_state: RNN hidden state
+        :param prev_output: previous tokens batch
+        :return: New hidden state, output logits
+        """
         inp_emb = self.embeddings(prev_output)
         new_dec_state = self.decoder(inp_emb, prev_state[0])
         output_logits = self.vocab_projection(new_dec_state)
@@ -84,6 +112,12 @@ class BaselineTranslationModel(nn.Module):
         return [new_dec_state], output_logits
 
     def decode(self, initial_state, out_tokens):
+        """
+        Iter decoder RNN over output tokens (use teacher forcing)
+        :param initial_state: encoder last state [batch_size, hidden_dim]
+        :param out_tokens: Ground truth output [batch_size, output_seq_len]
+        :return: Logits to all output tokens of shape [batch_size, output_seq_len, vocab_size]
+        """
         batch_size = out_tokens.shape[0]
         state = initial_state
 
@@ -99,6 +133,13 @@ class BaselineTranslationModel(nn.Module):
         return torch.stack(logits_sequence, dim=1)
 
     def decode_inference(self, initial_state, max_len=100, top_p=0.8):
+        """
+        Generate (using nucleus sampling) the output given encoder state
+        :param initial_state: Encoder initial state
+        :param max_len: Max tokens in the generated output
+        :param top_p: P in the nucleus sampling
+        :return: Predicted token ids of shape [batch_size, output_seq_len]
+        """
         batch_size, device = len(initial_state[0]), initial_state[0].device
         state = initial_state
         outputs = [torch.full([batch_size], self.vocab['<bos>'], dtype=torch.long,
@@ -125,7 +166,7 @@ class BaselineTranslationModel(nn.Module):
         return torch.stack(outputs, dim=1), all_states
 
 
-def _inference_model(model, batch, test_dataset, tokenizer=None):
+def _inference_model(model, batch, test_dataset, device, tokenizer=None):
     """
     Get model predictions without teacher forcing
     :param model: encoder-recoder NN
@@ -135,19 +176,24 @@ def _inference_model(model, batch, test_dataset, tokenizer=None):
     """
     if isinstance(model, BaselineTranslationModel):
         src, tgt = batch
-        encoded = model.encode(src)
-        pred, _ = model.decode_inference(encoded)
+        src.to(device)
+        tgt.to(device)
+        with torch.no_grad():
+            encoded = model.encode(src)
+            pred, _ = model.decode_inference(encoded)
         pred_tokens = test_dataset.detokenize(pred)
         src_tokens = test_dataset.detokenize(src)
     else:
-        outputs = model.generate(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], do_sample=True,
-                                 top_p=0.8, max_length=100)
+        with torch.no_grad():
+            outputs = model.generate(input_ids=batch['input_ids'].to(device),
+                                     attention_mask=batch['attention_mask'].to(device), do_sample=True, top_p=0.8,
+                                     max_length=100)
         pred_tokens = tokenizer.batch_decode(outputs.cpu().numpy(), skip_special_tokens=True)
         src_tokens = tokenizer.batch_decode(batch['input_ids'].cpu().numpy(), skip_special_tokens=True)
     return src_tokens, pred_tokens
 
 
-def _get_batch_loss(model, batch, return_pred=False):
+def _get_batch_loss(model, batch, device, return_pred=False):
     """
     Forward batch through the model in teacher-forcing and compute loss
     :param model: encoder-decoder NN
@@ -157,10 +203,13 @@ def _get_batch_loss(model, batch, return_pred=False):
     """
     if isinstance(model, BaselineTranslationModel):
         src, tgt = batch
+        src.to(device)
+        tgt.to(device)
         pred = model(src, tgt)
         loss = _compute_loss(pred, tgt, model.vocab['<pad>'])
         pred = pred.argmax(-1)
     else:
+        batch.to(device)
         model_outputs = model(**batch)
         loss = model_outputs.loss
         pred = model_outputs.logits.argmax(-1)
@@ -205,11 +254,10 @@ def train_step(train_loader, model, metrics, optimizer, scheduler, gradient_accu
     :param device:
     :return: None
     """
-    for i, batch in tqdm(enumerate(train_loader), leave=False):
-        batch.to(device)
+    for i, batch in tqdm(enumerate(train_loader), leave=False, total=len(train_loader)):
         step = len(metrics['train_loss']) + 1
         optimizer.zero_grad()
-        loss = _get_batch_loss(model, batch)
+        loss = _get_batch_loss(model, batch, device=device)
         loss.backward()
         if i % gradient_accumulation_steps == 0:
             optimizer.step()
@@ -221,8 +269,10 @@ def val_step(val_loader, model, model_id, metrics, best_bleu, device):
     """
     :param val_loader: validation data loader
     :param model: encoder-decoder NN
+    :param model_id: file/dir name under which to save the checkpoint
     :param metrics: dict with training statistics
     :param best_bleu: previous best BLEU value
+    :param device:
     :return: the best BLEU after validation step
     """
     mean_bleu = 0
@@ -230,8 +280,7 @@ def val_step(val_loader, model, model_id, metrics, best_bleu, device):
     step = len(metrics['train_loss'])
     for batch in tqdm(val_loader, leave=False):
         with torch.no_grad():
-            batch.to(device)
-            loss, pred, tgt = _get_batch_loss(model, batch, return_pred=True)
+            loss, pred, tgt = _get_batch_loss(model, batch, device=device, return_pred=True)
             mean_bleu += np.sum([Evaluator.bleu_score(p, t) for p, t in zip(pred.cpu().numpy(), tgt.cpu().numpy())])
             mean_loss += loss.item()
     metrics['dev_loss'].append((step, mean_loss / len(val_loader)))
@@ -256,15 +305,16 @@ def test_step(test_loader, model, tokenizer, verbose, device):
     :return: None
     """
     evaluator = Evaluator()
+    evaluator.similarity_model.to(device)
+    evaluator.toxicity_model.to(device)
     toxicity_drop = []
     similarity = []
 
     test_dataset = test_loader.dataset
 
-    for i, batch in tqdm(enumerate(test_loader), leave=False):
+    for i, batch in tqdm(enumerate(test_loader), leave=False, total=len(test_loader)):
         with torch.no_grad():
-            batch.to(device)
-            src_tokens, pred_tokens = _inference_model(model, batch, test_dataset, tokenizer)
+            src_tokens, pred_tokens = _inference_model(model, batch, test_dataset, device=device, tokenizer=tokenizer)
             if (i % 50 == 0) and verbose:
                 logger.info(f'Sample input: {src_tokens[0]}')
                 logger.info(f'Sample prediction: {pred_tokens[0]}')
@@ -320,10 +370,11 @@ def _train(epochs,
         plt.title(name)
         plt.plot(*zip(*history))
         plt.grid()
-    os.makedirs('reports/figures/', exist_ok=True)
-    plt.savefig(f'reports/figures/{experiment_start}_baseline.png')
+    os.makedirs('reports/figures/models', exist_ok=True)
+    plt.savefig(f'reports/figures/{model_id}.png')
 
     test_step(test_loader, model, tokenizer, verbose_test, device)
+    logger.info(f'Best checkpoint saved at {model_id}')
 
 
 def train_baseline(epochs: int,
@@ -347,7 +398,7 @@ def train_baseline(epochs: int,
     :return: None
     """
     device = torch.device(device_type)
-    experiment_start = str(datetime.datetime.now()).replace(' ', '_')
+    experiment_start = str(datetime.datetime.now()).replace(' ', '-').replace(':', '').split('.')[0]
     train_dataset = TextDetoxificationDataset(mode='train', use_bpe=use_subword_tokenization)
     val_dataset = TextDetoxificationDataset(mode='val', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
     test_dataset = TextDetoxificationDataset(mode='test', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
@@ -382,12 +433,13 @@ def train_baseline(epochs: int,
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    _train(epochs, model, None, 'models/baseline_best.pth', optimizer, scheduler, 1, train_loader, val_loader,
-           test_loader, verbose_test,experiment_start, device)
+    _train(epochs, model, None, f'models/{experiment_start}-baseline_best.pth', optimizer, scheduler, 1, train_loader,
+           val_loader,
+           test_loader, verbose_test, experiment_start, device)
 
 
 def _prepare_t5_model_and_datasets(batch_size, virtual_tokens: int):
-    train_df, val_df, test_df = [pd.read_csv(f'../data/interim/{stage}.tsv', sep='\t') for stage in
+    train_df, val_df, test_df = [pd.read_csv(f'data/interim/{stage}.tsv', sep='\t') for stage in
                                  ['train', 'val', 'test']]
     train_df = train_df.rename(columns={'reference': 'source', 'translation': 'target'})
     val_df = val_df.rename(columns={'reference': 'source', 'translation': 'target'})
@@ -422,6 +474,7 @@ def _prepare_t5_model_and_datasets(batch_size, virtual_tokens: int):
                                               collate_fn=data_collator)
 
     model = AutoModelForSeq2SeqLM.from_pretrained(T5_CHECKPOINT)
+    logger.info('Created model and collected datasets')
 
     return model, tokenizer, train_loader, val_loader, test_loader
 
@@ -435,7 +488,7 @@ def train_t5_lora(epochs: int = 5,
                   device_type: str = 'cuda:0',
                   verbose_test: bool = True):
     device = torch.device(device_type)
-    experiment_start = str(datetime.datetime.now()).replace(' ', '_')
+    experiment_start = str(datetime.datetime.now()).replace(' ', '-').replace(':', '').split('.')[0]
 
     model, tokenizer, train_loader, val_loader, test_loader = _prepare_t5_model_and_datasets(batch_size,
                                                                                              virtual_tokens=0)
@@ -457,14 +510,41 @@ def train_t5_lora(epochs: int = 5,
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    _train(epochs, model, tokenizer, 'models/T5-small-prefix-tuning-best', optimizer, scheduler,
+    _train(epochs, model, tokenizer, f'models/{experiment_start}-T5-small-lora-best', optimizer, scheduler,
+           gradient_accumulation_steps, train_loader, val_loader, test_loader, verbose_test, experiment_start, device)
+
+
+def train_t5_prefix_tuning(epochs: int = 5,
+                           batch_size: int = 32,
+                           gradient_accumulation_steps: int = 4,
+                           num_virtual_tokens: int = 8,
+                           device_type: str = 'cuda:0',
+                           verbose_test: bool = True):
+    device = torch.device(device_type)
+    experiment_start = str(datetime.datetime.now()).replace(' ', '-').replace(':', '').split('.')[0]
+
+    model, tokenizer, train_loader, val_loader, test_loader = _prepare_t5_model_and_datasets(batch_size,
+                                                                                             virtual_tokens=num_virtual_tokens)
+    peft_config = PrefixTuningConfig(
+        task_type=TaskType.SEQ_2_SEQ_LM,
+        inference_mode=False,
+        num_virtual_tokens=num_virtual_tokens
+    )
+    for param in model.parameters():
+        param.requires_grad = False
+
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+    model.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    _train(epochs, model, tokenizer, f'models/{experiment_start}-T5-small-prefix-tuning-best', optimizer, scheduler,
            gradient_accumulation_steps, train_loader, val_loader, test_loader, verbose_test, experiment_start, device)
 
 
 if __name__ == '__main__':
-    # Examples
-    # python src/models/train_model.py baseline --epochs=10 --batch_size=32 --embeddings_size=200
-    # python src/models/train_model.py t5_lora --epochs=5 --batch_size=32 --accumulate_steps=4
 
     sys.path.append(os.getcwd())
     torch.manual_seed(0)
@@ -476,6 +556,6 @@ if __name__ == '__main__':
         {
             "baseline": train_baseline,
             "t5_lora": train_t5_lora,
-            "t5_prefix_tuning": None
+            "t5_prefix_tuning": train_t5_prefix_tuning,
         }
     )

@@ -223,7 +223,7 @@ class TextDetoxificationDataset(Dataset):
             def _iterator():
                 for reference, reference in tqdm(zip(self.data.reference, self.data.translation),
                                                  desc='Collecting vocab'):
-                    yield self._tokenize_sentence(reference) + self._tokenize_sentence(reference)
+                    yield self.tokenize_sentence(reference) + self.tokenize_sentence(reference)
 
             logger.info('Started building vocab')
             if not self.use_bpe:
@@ -236,7 +236,7 @@ class TextDetoxificationDataset(Dataset):
 
         self.vocab = vocab
 
-    def _tokenize_sentence(self, sentence):
+    def tokenize_sentence(self, sentence):
         """
         Apply BPE or nltk.word_tokenize on the sentence.lower()
         :param sentence: str
@@ -286,8 +286,8 @@ class TextDetoxificationDataset(Dataset):
             source, target = row['translation'], row['reference']
 
         # Tokenize sentences and transform to indices
-        source_tokens = self._tokenize_sentence(source)
-        target_tokens = self._tokenize_sentence(target)
+        source_tokens = self.tokenize_sentence(source)
+        target_tokens = self.tokenize_sentence(target)
 
         source_indices = self.vocab(source_tokens)
         target_indices = self.vocab(target_tokens)
