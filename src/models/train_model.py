@@ -403,6 +403,8 @@ def train_baseline(epochs: int,
     val_dataset = TextDetoxificationDataset(mode='val', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
     test_dataset = TextDetoxificationDataset(mode='test', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
 
+    # Future improvement: save vocab into models to reduce inferencing overheads
+
     def collate_batch(batch, max_len=64):
         source, target = [], []
         for src_sentence, tgt_sentence, _ in batch:
