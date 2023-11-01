@@ -94,7 +94,7 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     random.seed(0)
 
-    from src.models.train_model import BaselineTranslationModel, T5_CHECKPOINT, T5_MAX_LENGTH
+    from src.models.train import BaselineTranslationModel, T5_CHECKPOINT, T5_MAX_LENGTH
     from src.data.make_dataset import TextDetoxificationDataset
 
     Fire(

@@ -10,18 +10,18 @@ k.galliamov@innopolis.university BS21-DS01
 ## Training
     
 ```shell
-python src/models/train_model.py baseline --epochs=10 --batch_size=32 --embeddings_size=200
+python src/models/train.py baseline --epochs=10 --batch_size=32 --embeddings_size=200
 
-python src/models/train_model.py t5_lora --epochs=5 --batch_size=32 --gradient_accumulation_steps=4
+python src/models/train.py t5_lora --epochs=5 --batch_size=32 --gradient_accumulation_steps=4
     
-python src/models/train_model.py t5_prefix_tuning --epochs=5 --batch_size=32 --num_virtual_tokens=8
+python src/models/train.py t5_prefix_tuning --epochs=5 --batch_size=32 --num_virtual_tokens=8
 ```
 
 ## Testing
 
 ```shell
-python src/models/predict_model.py baseline --source="this is very rude"
-python src/models/predict_model.py t5 --source="this is very rude" --peft_config_path="models/T5-small-lora"
-python src/models/predict_model.py t5 --source="this is very rude" --peft_config_path="models/T5-small-prefix-tuning"
+python src/models/predict.py baseline --source="this is very rude"
+python src/models/predict.py t5 --source="this is very rude" --peft_config_path="models/T5-small-lora"
+python src/models/predict.py t5 --source="this is very rude" --peft_config_path="models/T5-small-prefix-tuning"
 ```
 

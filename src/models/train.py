@@ -509,7 +509,7 @@ def train_t5_lora(epochs: int = 5,
     model.print_trainable_parameters()
     model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     _train(epochs, model, tokenizer, f'models/{experiment_start}-T5-small-lora-best', optimizer, scheduler,
