@@ -403,7 +403,7 @@ def train_baseline(epochs: int,
     val_dataset = TextDetoxificationDataset(mode='val', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
     test_dataset = TextDetoxificationDataset(mode='test', use_bpe=use_subword_tokenization, vocab=train_dataset.vocab)
 
-    # Future improvement: save vocab into models to reduce inferencing overheads
+    # Future improvement: save vocab into models/ to reduce inferencing overheads
 
     def collate_batch(batch, max_len=64):
         source, target = [], []
@@ -489,6 +489,18 @@ def train_t5_lora(epochs: int = 5,
                   lora_dropout: float = 0.1,
                   device_type: str = 'cuda:0',
                   verbose_test: bool = True):
+    """
+
+    :param epochs: Number of training epochs
+    :param batch_size: Batch size to be set in the dataloaders (actual batch size = batch_size * gradient_accumulation_steps)
+    :param gradient_accumulation_steps: Perform gradient step after this many batches
+    :param lora_r: Matrices rank in LoRA
+    :param lora_alpha: LoRA alpha parameter
+    :param lora_dropout: LoRA dropout probability
+    :param device_type: torch.device(device_type) will hold model and data
+    :param verbose_test: If set to True, print test translation examples to console
+    :return: None
+    """
     device = torch.device(device_type)
     experiment_start = str(datetime.datetime.now()).replace(' ', '-').replace(':', '').split('.')[0]
 
@@ -522,6 +534,16 @@ def train_t5_prefix_tuning(epochs: int = 5,
                            num_virtual_tokens: int = 8,
                            device_type: str = 'cuda:0',
                            verbose_test: bool = True):
+    """
+
+    :param epochs: Number of training epochs
+    :param batch_size: Batch size to be set in the dataloaders (actual batch size = batch_size * gradient_accumulation_steps)
+    :param gradient_accumulation_steps: Perform gradient step after this many batches
+    :param num_virtual_tokens: Number of tokens prepended to input at attention layers
+    :param device_type: torch.device(device_type) will hold model and data
+    :param verbose_test: If set to True, print test translation examples to console
+    :return: None
+    """
     device = torch.device(device_type)
     experiment_start = str(datetime.datetime.now()).replace(' ', '-').replace(':', '').split('.')[0]
 
